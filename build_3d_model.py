@@ -474,8 +474,16 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                 tiles[x + y * width] = 0
                 walls.append(Wall(x1, y1, x2, y2, "wall")) # type: ignore
     
+    # ============================================================================
+    # FLOOD-FILL ROOM DETECTION
+    # ============================================================================
+    # Finds connected regions (rooms) in the grid
+    # Border cells (tiles=0) act as boundaries - flood-fill cannot cross them
+    # ============================================================================
+
     room_id = 1
     directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+    rooms_detected = 0
 
     for y in range(height):
         for x in range(width):
@@ -485,6 +493,7 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
             if tiles[index] == -1:
                 stack = [(x, y)]
                 tiles[index] = room_id
+                cells_in_room = 1
 
                 while stack:
                     cx, cy = stack.pop()
@@ -500,11 +509,25 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                             if tiles[n_index] == -1:
                                 tiles[n_index] = room_id
                                 stack.append((nx, ny))
+                                cells_in_room += 1
 
+                print(f"Room {room_id} detected: {cells_in_room} cells")
+                rooms_detected += 1
                 room_id += 1
+
+    print(f"✓ Flood-fill complete: {rooms_detected} room(s) detected")
+
+    # ============================================================================
+    # GREEDY RECTANGLE MERGING
+    # ============================================================================
+    # Converts room cells into floor quads for efficient rendering
+    # Uses greedy algorithm to merge adjacent cells into larger rectangles
+    # ============================================================================
 
     occupied = [0] * len(tiles)
     room_meshes: "dict[int, list[tuple[float, float, float, float]]]" = {}
+    quads_generated = 0
+
     for y in range(height):
         for x in range(width):
             room_id = tiles[x + y * width]
@@ -521,7 +544,7 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
 
             if y == iy:
                 continue
-            
+
             ix = x + 1
             for ix in range(ix, width):
                 failed = False
@@ -532,43 +555,49 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
 
                 if failed:
                     break
-                
+
             if ix == width:
                 ix -= 1
-            
+
             if x == ix:
                 continue
-            
+
             for jy in range(y, iy):
                 for jx in range(x, ix):
                     occupied[jx + jy * width] = room_id
-            
+
             room_meshes.setdefault(room_id, []).append((
                 x_grid[x],
                 y_grid[y],
                 x_grid[ix],
                 y_grid[iy],
             ))
-    
-    for x in range(width):
-        room_id = tiles[x]
-        if room_id != 0 and room_id in room_meshes:
-            del room_meshes[room_id]
+            quads_generated += 1
 
-        room_id = tiles[x + (width * (height - 1))]
-        if room_id != 0 and room_id in room_meshes:
-            del room_meshes[room_id]
+    # ============================================================================
+    # REMOVED: Legacy border room removal code
+    # ============================================================================
+    # Previous code deleted rooms touching borders (lines 553-569)
+    # This is NO LONGER NEEDED because:
+    # 1. Border cells are now marked as occupied (tiles=0)
+    # 2. Flood-fill cannot cross them
+    # 3. Legitimate rooms near edges should NOT be deleted
+    # 4. This was causing MISSING FLOORS in valid rooms!
+    # ============================================================================
 
-    for y in range(height):
-        room_id = tiles[y * width]
-        if room_id != 0 and room_id in room_meshes:
-            del room_meshes[room_id]
+    total_rooms_with_floors = len(room_meshes)
+    print(f"✓ Floor generation complete:")
+    print(f"  - {total_rooms_with_floors} room(s) with floors")
+    print(f"  - {quads_generated} floor quad(s) generated")
+    print(f"  - Grid: {width}x{height} cells")
 
-        room_id = tiles[y * width + width - 1]
-        if room_id != 0 and room_id in room_meshes:
-            del room_meshes[room_id]
-            
-    print(f"Room grid: {width} x {height}, Room Count: {room_id - 1}")
+    if total_rooms_with_floors == 0:
+        print(f"⚠ WARNING: NO FLOORS GENERATED!")
+        print(f"  Possible causes:")
+        print(f"  - All cells marked as walls (check gap filling)")
+        print(f"  - Flood-fill found no rooms (check border marking)")
+        print(f"  - Rectangle merging failed (check greedy algorithm)")
+
     return room_meshes
 
 def get_normalizer(data: dict):
