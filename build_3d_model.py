@@ -287,6 +287,8 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
             center_x = (x1 + x2) * 0.5
             center_y = (y1 + y2) * 0.5
 
+            # Check if any architectural element (wall, window, door) overlaps with this grid cell
+            # Using center point detection to mark occupied cells
             for wall in walls:
                 if wall.x1 < center_x < wall.x2 \
                     and wall.y1 < center_y < wall.y2:
@@ -296,18 +298,29 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
     for y, (y1, y2) in enumerate(zip(y_grid, y_grid[1:])):
         for x, (x1, x2) in enumerate(zip(x_grid, x_grid[1:])):
             if x == 0 or x == width - 1 or y == 0 or y == height - 1 or tiles[x + y * width] == 0:
-                continue 
+                continue
 
             cell_width = x2 - x1
             cell_height = y2 - y1
 
-            is_gap_vertical = cell_height < tolerance * 3 and tiles[x + (y - 1) * width] == 0 and tiles[x + (y + 1) * width] == 0
-            is_gap_horizontal = cell_width < tolerance * 3 and tiles[(x - 1) + y * width] == 0 and tiles[(x + 1) + y * width] == 0
+            # Enhanced gap filling: Check if there's any architectural element (wall, window, or door)
+            # on both sides of a small gap. This fills gaps between ANY combination of elements:
+            # wall-wall, wall-window, wall-door, window-window, window-door, door-door
+
+            # Check vertical gaps (elements above and below)
+            has_element_above = tiles[x + (y - 1) * width] == 0
+            has_element_below = tiles[x + (y + 1) * width] == 0
+            is_gap_vertical = cell_height < tolerance * 3 and has_element_above and has_element_below
+
+            # Check horizontal gaps (elements left and right)
+            has_element_left = tiles[(x - 1) + y * width] == 0
+            has_element_right = tiles[(x + 1) + y * width] == 0
+            is_gap_horizontal = cell_width < tolerance * 3 and has_element_left and has_element_right
 
             if not is_gap_horizontal and not is_gap_vertical:
                 continue
 
-            print(f"Fixing gap {(x1, y1, x2, y2)}")
+            print(f"Fixing gap between elements at {(x1, y1, x2, y2)}")
 
             tiles[x + y * width] = 0
             walls.append(Wall(x1, y1, x2, y2, "wall")) # type: ignore
