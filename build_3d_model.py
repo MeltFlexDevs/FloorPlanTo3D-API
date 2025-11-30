@@ -340,25 +340,24 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                         right_element_x = scan_x
                         break
 
-                # If we have elements on both sides, fill the gap
+                # If we have elements on both sides, ALWAYS fill the gap
+                # NO TOLERANCE CHECK - we fill ANY gap between architectural elements
+                # This ensures absolutely NO gaps remain that could cause missing floors
                 if left_element_found and right_element_found:
-                    # Calculate physical distance between elements
+                    # Calculate physical distance between elements (for logging only)
                     gap_start_x = x_grid[left_element_x + 1]  # Right edge of left element
                     gap_end_x = x_grid[right_element_x]       # Left edge of right element
                     gap_distance = gap_end_x - gap_start_x
 
-                    # Fill if gap is reasonably small (less than 1 meter)
-                    # This is very generous to ensure all legitimate gaps are filled
-                    if gap_distance < 1.0:
-                        x1, x2 = x_grid[x], x_grid[x + 1]
-                        y1, y2 = y_grid[y], y_grid[y + 1]
+                    x1, x2 = x_grid[x], x_grid[x + 1]
+                    y1, y2 = y_grid[y], y_grid[y + 1]
 
-                        tiles[x + y * width] = 0
-                        walls.append(Wall(x1, y1, x2, y2, "wall"))
-                        gaps_filled_this_iteration += 1
+                    tiles[x + y * width] = 0
+                    walls.append(Wall(x1, y1, x2, y2, "wall"))
+                    gaps_filled_this_iteration += 1
 
-                        print(f"[Pass {iteration + 1}] Filled HORIZONTAL gap at grid({x},{y}) coords({x1:.3f},{y1:.3f}) gap_size={gap_distance:.3f}m")
-                        continue  # Move to next cell
+                    print(f"[Pass {iteration + 1}] Filled HORIZONTAL gap at grid({x},{y}) coords({x1:.3f},{y1:.3f}) gap_size={gap_distance:.3f}m")
+                    continue  # Move to next cell
 
                 # ========== VERTICAL GAP DETECTION ==========
                 # Scan up to find nearest element
@@ -379,23 +378,23 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                         bottom_element_y = scan_y
                         break
 
-                # If we have elements on both sides, fill the gap
+                # If we have elements on both sides, ALWAYS fill the gap
+                # NO TOLERANCE CHECK - we fill ANY gap between architectural elements
+                # This ensures absolutely NO gaps remain that could cause missing floors
                 if top_element_found and bottom_element_found:
-                    # Calculate physical distance between elements
+                    # Calculate physical distance between elements (for logging only)
                     gap_start_y = y_grid[top_element_y + 1]    # Bottom edge of top element
                     gap_end_y = y_grid[bottom_element_y]       # Top edge of bottom element
                     gap_distance = gap_end_y - gap_start_y
 
-                    # Fill if gap is reasonably small (less than 1 meter)
-                    if gap_distance < 1.0:
-                        x1, x2 = x_grid[x], x_grid[x + 1]
-                        y1, y2 = y_grid[y], y_grid[y + 1]
+                    x1, x2 = x_grid[x], x_grid[x + 1]
+                    y1, y2 = y_grid[y], y_grid[y + 1]
 
-                        tiles[x + y * width] = 0
-                        walls.append(Wall(x1, y1, x2, y2, "wall"))
-                        gaps_filled_this_iteration += 1
+                    tiles[x + y * width] = 0
+                    walls.append(Wall(x1, y1, x2, y2, "wall"))
+                    gaps_filled_this_iteration += 1
 
-                        print(f"[Pass {iteration + 1}] Filled VERTICAL gap at grid({x},{y}) coords({x1:.3f},{y1:.3f}) gap_size={gap_distance:.3f}m")
+                    print(f"[Pass {iteration + 1}] Filled VERTICAL gap at grid({x},{y}) coords({x1:.3f},{y1:.3f}) gap_size={gap_distance:.3f}m")
 
         # Check if we're done
         if gaps_filled_this_iteration == 0:
