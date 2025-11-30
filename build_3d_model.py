@@ -282,6 +282,23 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
     height = len(y_grid) - 1
     tiles: "list[int]" = [-1] * (width * height)
 
+    # Mark border cells as occupied (0) so gap filling works correctly at edges
+    # This ensures gaps near borders get filled properly
+    border_cells_marked = 0
+    for x in range(width):
+        tiles[x + 0 * width] = 0  # Top border
+        tiles[x + (height - 1) * width] = 0  # Bottom border
+        border_cells_marked += 2
+    for y in range(height):
+        tiles[0 + y * width] = 0  # Left border
+        tiles[(width - 1) + y * width] = 0  # Right border
+        border_cells_marked += 2
+    print(f"Grid initialized: {width}x{height} cells, {border_cells_marked} border cells marked")
+
+    # Mark cells occupied by architectural elements (walls, windows, doors)
+    elements_marked = 0
+    element_type_counts = {"wall": 0, "window": 0, "door": 0}
+
     for y, (y1, y2) in enumerate(zip(y_grid, y_grid[1:])):
         for x, (x1, x2) in enumerate(zip(x_grid, x_grid[1:])):
             center_x = (x1 + x2) * 0.5
@@ -289,11 +306,16 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
 
             # Check if any architectural element (wall, window, door) overlaps with this grid cell
             # Using center point detection to mark occupied cells
+            # FIXED: Use <= instead of < to include elements on exact boundaries
             for wall in walls:
-                if wall.x1 < center_x < wall.x2 \
-                    and wall.y1 < center_y < wall.y2:
+                if wall.x1 <= center_x <= wall.x2 \
+                    and wall.y1 <= center_y <= wall.y2:
                     tiles[x + y * width] = 0
+                    elements_marked += 1
+                    element_type_counts[wall.type] = element_type_counts.get(wall.type, 0) + 1
                     break
+
+    print(f"Marked {elements_marked} cells: {element_type_counts['wall']} wall, {element_type_counts['window']} window, {element_type_counts['door']} door")
 
     # ============================================================================
     # BULLETPROOF GAP FILLING ALGORITHM - GUARANTEED ZERO GAPS
@@ -311,10 +333,6 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
         # Scan every cell in the grid
         for y in range(height):
             for x in range(width):
-                # Skip borders
-                if x == 0 or x == width - 1 or y == 0 or y == height - 1:
-                    continue
-
                 # Skip already occupied cells
                 if tiles[x + y * width] == 0:
                     continue
@@ -325,19 +343,23 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                 # Scan left to find nearest element
                 left_element_found = False
                 left_element_x = -1
+                left_distance = 0
                 for scan_x in range(x - 1, -1, -1):
                     if tiles[scan_x + y * width] == 0:
                         left_element_found = True
                         left_element_x = scan_x
+                        left_distance = x - scan_x
                         break
 
                 # Scan right to find nearest element
                 right_element_found = False
                 right_element_x = -1
+                right_distance = 0
                 for scan_x in range(x + 1, width):
                     if tiles[scan_x + y * width] == 0:
                         right_element_found = True
                         right_element_x = scan_x
+                        right_distance = scan_x - x
                         break
 
                 # If we have elements on both sides, ALWAYS fill the gap
@@ -356,26 +378,39 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                     walls.append(Wall(x1, y1, x2, y2, "wall"))
                     gaps_filled_this_iteration += 1
 
-                    print(f"[Pass {iteration + 1}] Filled HORIZONTAL gap at grid({x},{y}) coords({x1:.3f},{y1:.3f}) gap_size={gap_distance:.3f}m")
+                    # Detailed logging showing left/right distances for debugging edge cases
+                    edge_case = ""
+                    if left_element_x == 0 or right_element_x == width - 1:
+                        edge_case = " [NEAR BORDER]"
+                    if left_distance == 1 and right_distance == 1:
+                        edge_case = " [DIRECT NEIGHBORS]"
+                    elif left_distance > 5 or right_distance > 5:
+                        edge_case = f" [WIDE GAP: L={left_distance} R={right_distance}]"
+
+                    print(f"[Pass {iteration + 1}] Filled HORIZONTAL gap at grid({x},{y}) coords({x1:.3f},{y1:.3f}) gap={gap_distance:.3f}m{edge_case}")
                     continue  # Move to next cell
 
                 # ========== VERTICAL GAP DETECTION ==========
                 # Scan up to find nearest element
                 top_element_found = False
                 top_element_y = -1
+                above_distance = 0
                 for scan_y in range(y - 1, -1, -1):
                     if tiles[x + scan_y * width] == 0:
                         top_element_found = True
                         top_element_y = scan_y
+                        above_distance = y - scan_y
                         break
 
                 # Scan down to find nearest element
                 bottom_element_found = False
                 bottom_element_y = -1
+                below_distance = 0
                 for scan_y in range(y + 1, height):
                     if tiles[x + scan_y * width] == 0:
                         bottom_element_found = True
                         bottom_element_y = scan_y
+                        below_distance = scan_y - y
                         break
 
                 # If we have elements on both sides, ALWAYS fill the gap
@@ -394,7 +429,16 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                     walls.append(Wall(x1, y1, x2, y2, "wall"))
                     gaps_filled_this_iteration += 1
 
-                    print(f"[Pass {iteration + 1}] Filled VERTICAL gap at grid({x},{y}) coords({x1:.3f},{y1:.3f}) gap_size={gap_distance:.3f}m")
+                    # Detailed logging showing top/bottom distances for debugging edge cases
+                    edge_case = ""
+                    if top_element_y == 0 or bottom_element_y == height - 1:
+                        edge_case = " [NEAR BORDER]"
+                    if above_distance == 1 and below_distance == 1:
+                        edge_case = " [DIRECT NEIGHBORS]"
+                    elif above_distance > 5 or below_distance > 5:
+                        edge_case = f" [WIDE GAP: T={above_distance} B={below_distance}]"
+
+                    print(f"[Pass {iteration + 1}] Filled VERTICAL gap at grid({x},{y}) coords({x1:.3f},{y1:.3f}) gap={gap_distance:.3f}m{edge_case}")
 
         # Check if we're done
         if gaps_filled_this_iteration == 0:
