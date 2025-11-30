@@ -295,35 +295,112 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                     tiles[x + y * width] = 0
                     break
 
-    for y, (y1, y2) in enumerate(zip(y_grid, y_grid[1:])):
-        for x, (x1, x2) in enumerate(zip(x_grid, x_grid[1:])):
-            if x == 0 or x == width - 1 or y == 0 or y == height - 1 or tiles[x + y * width] == 0:
-                continue
+    # ROBUST MULTI-PASS GAP FILLING ALGORITHM
+    # This algorithm iteratively fills gaps between architectural elements until no more gaps are found.
+    # It uses lookahead to detect elements even if they are separated by multiple empty cells.
 
-            cell_width = x2 - x1
-            cell_height = y2 - y1
+    max_iterations = 10  # Maximum number of gap filling passes
+    max_lookahead = 10   # Maximum number of cells to look ahead for finding elements
 
-            # Enhanced gap filling: Check if there's any architectural element (wall, window, or door)
-            # on both sides of a small gap. This fills gaps between ANY combination of elements:
-            # wall-wall, wall-window, wall-door, window-window, window-door, door-door
+    for iteration in range(max_iterations):
+        gaps_filled = 0
 
-            # Check vertical gaps (elements above and below)
-            has_element_above = tiles[x + (y - 1) * width] == 0
-            has_element_below = tiles[x + (y + 1) * width] == 0
-            is_gap_vertical = cell_height < tolerance * 3 and has_element_above and has_element_below
+        for y, (y1, y2) in enumerate(zip(y_grid, y_grid[1:])):
+            for x, (x1, x2) in enumerate(zip(x_grid, x_grid[1:])):
+                # Skip borders and already occupied cells
+                if x == 0 or x == width - 1 or y == 0 or y == height - 1 or tiles[x + y * width] == 0:
+                    continue
 
-            # Check horizontal gaps (elements left and right)
-            has_element_left = tiles[(x - 1) + y * width] == 0
-            has_element_right = tiles[(x + 1) + y * width] == 0
-            is_gap_horizontal = cell_width < tolerance * 3 and has_element_left and has_element_right
+                cell_width = x2 - x1
+                cell_height = y2 - y1
 
-            if not is_gap_horizontal and not is_gap_vertical:
-                continue
+                # Enhanced gap filling with LOOKAHEAD: Check if there's any architectural element
+                # (wall, window, or door) within lookahead distance on both sides of a gap.
+                # This fills gaps between ANY combination of elements across multiple empty cells.
 
-            print(f"Fixing gap between elements at {(x1, y1, x2, y2)}")
+                # HORIZONTAL GAP DETECTION with lookahead
+                has_element_left = False
+                has_element_right = False
+                left_distance = 0
+                right_distance = 0
 
-            tiles[x + y * width] = 0
-            walls.append(Wall(x1, y1, x2, y2, "wall")) # type: ignore
+                # Look left for an element (up to max_lookahead cells)
+                for look_dist in range(1, min(max_lookahead + 1, x + 1)):
+                    if tiles[(x - look_dist) + y * width] == 0:
+                        has_element_left = True
+                        left_distance = look_dist
+                        break
+
+                # Look right for an element (up to max_lookahead cells)
+                for look_dist in range(1, min(max_lookahead + 1, width - x)):
+                    if tiles[(x + look_dist) + y * width] == 0:
+                        has_element_right = True
+                        right_distance = look_dist
+                        break
+
+                # Calculate total gap width (including this cell and empty neighbors)
+                total_gap_width = cell_width
+                if has_element_left and has_element_right:
+                    # Sum up widths of all cells in the gap
+                    for gap_x in range(max(0, x - left_distance + 1), min(width, x + right_distance)):
+                        if gap_x != x and tiles[gap_x + y * width] != 0:
+                            gap_x1, gap_x2 = x_grid[gap_x], x_grid[gap_x + 1]
+                            total_gap_width += (gap_x2 - gap_x1)
+
+                # Adaptive tolerance: fill if total gap is small, regardless of number of cells
+                is_gap_horizontal = has_element_left and has_element_right and total_gap_width < tolerance * 5
+
+                # VERTICAL GAP DETECTION with lookahead
+                has_element_above = False
+                has_element_below = False
+                above_distance = 0
+                below_distance = 0
+
+                # Look up for an element (up to max_lookahead cells)
+                for look_dist in range(1, min(max_lookahead + 1, y + 1)):
+                    if tiles[x + (y - look_dist) * width] == 0:
+                        has_element_above = True
+                        above_distance = look_dist
+                        break
+
+                # Look down for an element (up to max_lookahead cells)
+                for look_dist in range(1, min(max_lookahead + 1, height - y)):
+                    if tiles[x + (y + look_dist) * width] == 0:
+                        has_element_below = True
+                        below_distance = look_dist
+                        break
+
+                # Calculate total gap height (including this cell and empty neighbors)
+                total_gap_height = cell_height
+                if has_element_above and has_element_below:
+                    # Sum up heights of all cells in the gap
+                    for gap_y in range(max(0, y - above_distance + 1), min(height, y + below_distance)):
+                        if gap_y != y and tiles[x + gap_y * width] != 0:
+                            gap_y1, gap_y2 = y_grid[gap_y], y_grid[gap_y + 1]
+                            total_gap_height += (gap_y2 - gap_y1)
+
+                # Adaptive tolerance: fill if total gap is small, regardless of number of cells
+                is_gap_vertical = has_element_above and has_element_below and total_gap_height < tolerance * 5
+
+                if not is_gap_horizontal and not is_gap_vertical:
+                    continue
+
+                # Fill the gap
+                direction = "horizontal" if is_gap_horizontal else "vertical"
+                print(f"[Pass {iteration + 1}] Filling {direction} gap between elements at {(x1, y1, x2, y2)}")
+
+                tiles[x + y * width] = 0
+                walls.append(Wall(x1, y1, x2, y2, "wall"))
+                gaps_filled += 1
+
+        # If no gaps were filled in this iteration, we're done
+        if gaps_filled == 0:
+            print(f"Gap filling completed after {iteration + 1} iteration(s). No more gaps found.")
+            break
+        else:
+            print(f"[Pass {iteration + 1}] Filled {gaps_filled} gap(s). Running another pass...")
+    else:
+        print(f"Gap filling completed after {max_iterations} iterations (max limit reached).")
     
     # Find missing walls by checking the image for every empty cell. By randomly sampling pixels, if the cell is 80% black pixels, it's probably a wall.
     if sample_image is not None:
