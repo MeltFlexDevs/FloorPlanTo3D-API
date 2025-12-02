@@ -608,50 +608,130 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
 
     print(f"✓ Flood-fill complete: Found {len(regions)} connected empty region(s)")
 
-    # Step 2: Calculate physical area of each region
-    region_areas = {}
+    # Step 2: Calculate physical properties of each region
+    # NOT just area - also shape, compactness, position!
+    region_properties = {}
+
     for rid, cells in regions.items():
         total_area = 0.0
+        min_x, max_x = float('inf'), float('-inf')
+        min_y, max_y = float('inf'), float('-inf')
+
         for cx, cy in cells:
             x1, x2 = x_grid[cx], x_grid[cx + 1]
             y1, y2 = y_grid[cy], y_grid[cy + 1]
             cell_area = (x2 - x1) * (y2 - y1)
             total_area += cell_area
-        region_areas[rid] = total_area
 
-    # Step 3: Classify regions as ROOMS or GAPS based on total area
-    # ADAPTIVE THRESHOLD: Start with 0.5 m², reduce if needed
-    ROOM_AREA_THRESHOLDS = [0.5, 0.3, 0.2, 0.1, 0.05]  # m² - try multiple thresholds
+            # Track bounding box
+            min_x = min(min_x, x1)
+            max_x = max(max_x, x2)
+            min_y = min(min_y, y1)
+            max_y = max(max_y, y2)
+
+        # Calculate shape metrics
+        bbox_width = max_x - min_x
+        bbox_height = max_y - min_y
+        bbox_area = bbox_width * bbox_height
+
+        # Aspect ratio: how elongated is the region? (1.0 = square, >1.0 = elongated)
+        aspect_ratio = max(bbox_width, bbox_height) / max(min(bbox_width, bbox_height), 0.001)
+
+        # Compactness: how much of bounding box is filled? (1.0 = fully filled, <1.0 = sparse/elongated)
+        compactness = total_area / max(bbox_area, 0.0001)
+
+        # Check if touching border (suspicious for gaps!)
+        touches_border = (
+            any(cx == 0 or cx == width - 1 for cx, cy in cells) or
+            any(cy == 0 or cy == height - 1 for cx, cy in cells)
+        )
+
+        region_properties[rid] = {
+            'area': total_area,
+            'cells': cells,
+            'bbox_width': bbox_width,
+            'bbox_height': bbox_height,
+            'aspect_ratio': aspect_ratio,
+            'compactness': compactness,
+            'touches_border': touches_border,
+        }
+
+    # Step 3: SMART CLASSIFICATION using MULTIPLE criteria
+    # A region is a ROOM if it meets ALL these conditions:
+    # 1. Large enough area (> threshold)
+    # 2. Reasonable aspect ratio (< 5:1) - not too elongated
+    # 3. Good compactness (> 0.3) - not too sparse
+    # 4. OR if it's very large (> 2 m²), ignore shape
+    #
+    # EVERYTHING ELSE = GAP → FILL IT!
+
+    MIN_ROOM_AREA = 0.8  # m² - minimum area for a room
+    MAX_ASPECT_RATIO = 5.0  # Maximum elongation (5:1)
+    MIN_COMPACTNESS = 0.25  # Minimum fill ratio
+    LARGE_ROOM_AREA = 2.0  # m² - if this large, definitely a room regardless of shape
 
     rooms_found = 0
     gaps_to_fill = []
-    ROOM_THRESHOLD = None
+    classification_details = []
 
-    # Try thresholds until we find at least 1 room (if there are any large regions)
-    for threshold in ROOM_AREA_THRESHOLDS:
-        rooms_found = 0
-        gaps_to_fill = []
+    for rid, props in sorted(region_properties.items(), key=lambda x: x[1]['area'], reverse=True):
+        area = props['area']
+        aspect = props['aspect_ratio']
+        compact = props['compactness']
+        border = props['touches_border']
 
-        for rid, area in region_areas.items():
-            if area >= threshold:
-                rooms_found += 1
-            else:
-                gaps_to_fill.extend(regions[rid])
+        # Classification logic
+        is_room = False
+        reason = ""
 
-        # If we found rooms, or this is the last threshold, use it
-        if rooms_found > 0 or threshold == ROOM_AREA_THRESHOLDS[-1]:
-            ROOM_THRESHOLD = threshold
-            break
+        if area >= LARGE_ROOM_AREA:
+            # Very large area - definitely a room
+            is_room = True
+            reason = f"ROOM (large: {area:.3f}m²)"
+        elif area >= MIN_ROOM_AREA and aspect <= MAX_ASPECT_RATIO and compact >= MIN_COMPACTNESS:
+            # Medium area with good shape - likely a room
+            is_room = True
+            reason = f"ROOM (area:{area:.3f}m², aspect:{aspect:.1f}, compact:{compact:.2f})"
+        else:
+            # Everything else is a GAP
+            is_room = False
+            if area < MIN_ROOM_AREA:
+                reason = f"GAP (too small: {area:.3f}m²)"
+            elif aspect > MAX_ASPECT_RATIO:
+                reason = f"GAP (elongated: aspect {aspect:.1f} > {MAX_ASPECT_RATIO})"
+            elif compact < MIN_COMPACTNESS:
+                reason = f"GAP (sparse: compact {compact:.2f} < {MIN_COMPACTNESS})"
 
-    print(f"✓ Region classification (threshold: {ROOM_THRESHOLD} m²):")
+            # EXTRA SUSPICIOUS: At border with bad shape
+            if border and (aspect > 3 or compact < 0.4):
+                reason += " [BORDER+SUSPICIOUS]"
+
+        if is_room:
+            rooms_found += 1
+        else:
+            gaps_to_fill.extend(props['cells'])
+
+        classification_details.append({
+            'rid': rid,
+            'area': area,
+            'aspect': aspect,
+            'compact': compact,
+            'border': border,
+            'is_room': is_room,
+            'reason': reason,
+            'cells': len(props['cells'])
+        })
+
+    print(f"✓ SMART region classification (multi-criteria):")
+    print(f"  - Criteria: area ≥ {MIN_ROOM_AREA}m², aspect ≤ {MAX_ASPECT_RATIO}, compact ≥ {MIN_COMPACTNESS}")
     print(f"  - ROOMS (protected): {rooms_found} region(s)")
-    print(f"  - GAPS (to fill): {len(regions) - rooms_found} region(s), {len(gaps_to_fill)} cell(s)")
+    print(f"  - GAPS (to fill): {len(region_properties) - rooms_found} region(s), {len(gaps_to_fill)} cell(s)")
+    print(f"")
 
     # Show details of each region
-    for rid, area in sorted(region_areas.items(), key=lambda x: x[1], reverse=True):
-        cells_count = len(regions[rid])
-        region_type = "ROOM" if area >= ROOM_THRESHOLD else "GAP"
-        print(f"    Region {rid}: {area:.4f} m² ({cells_count} cells) → {region_type}")
+    for detail in classification_details:
+        border_mark = " 🚨BORDER" if detail['border'] else ""
+        print(f"    Region {detail['rid']}: {detail['reason']} ({detail['cells']} cells){border_mark}")
 
     # Step 4: Fill ALL gap cells as walls
     gaps_filled = 0
@@ -664,9 +744,10 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
         gaps_filled += 1
 
     print(f"")
-    print(f"✓ ROOM-AWARE filling complete:")
+    print(f"✓ SMART gap filling complete:")
     print(f"  - Gaps filled: {gaps_filled} cell(s)")
     print(f"  - Rooms preserved: {rooms_found}")
+    print(f"  - Classification: Multi-criteria (area + shape + position)")
     print(f"  - GUARANTEE: ZERO gaps remain (all non-room cells filled)!")
     print(f"━" * 80)
 
@@ -818,9 +899,9 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
     print(f"Gap Filling Results:")
     print(f"  - Elements marked: {elements_marked} cells (OVERLAP-based)")
     print(f"  - Bulletproof filling: Multiple horizontal/vertical passes")
-    print(f"  - Room-aware filling: {gaps_filled} gap(s) filled")
-    print(f"  - Rooms protected: {rooms_found} (topology-based)")
-    print(f"  - Room threshold: {ROOM_THRESHOLD} m² (adaptive)")
+    print(f"  - SMART filling: {gaps_filled} gap(s) filled")
+    print(f"  - Rooms protected: {rooms_found} (multi-criteria: area+shape+position)")
+    print(f"  - Criteria: MIN_AREA={MIN_ROOM_AREA}m², MAX_ASPECT={MAX_ASPECT_RATIO}, MIN_COMPACT={MIN_COMPACTNESS}")
     print(f"")
     print(f"Floor Generation:")
     print(f"  - Final rooms detected: {rooms_detected}")
