@@ -380,27 +380,40 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
         border_cells_marked += 2
     print(f"Grid initialized: {width}x{height} cells, {border_cells_marked} border cells marked")
 
-    # Mark cells occupied by architectural elements (walls, windows, doors)
+    # ============================================================================
+    # CRITICAL FIX: OVERLAP-BASED ELEMENT MARKING
+    # ============================================================================
+    # PREVIOUS BUG: Used center point detection
+    #   - Only marked cell if center point was inside element
+    #   - Thin elements (5mm wall) + large cells (20mm) = center outside element
+    #   - Result: Elements NOT marked, gap filling created duplicate walls
+    #
+    # NEW SOLUTION: AABB (Axis-Aligned Bounding Box) overlap detection
+    #   - Mark cell if it overlaps with element IN ANY WAY
+    #   - Check: wall.x1 < cell.x2 AND wall.x2 > cell.x1 AND ...
+    #   - GUARANTEES all element-occupied cells are marked
+    #   - Result: ACCURATE element marking, NO duplicate walls
+    # ============================================================================
+
     elements_marked = 0
     element_type_counts = {"wall": 0, "window": 0, "door": 0}
 
     for y, (y1, y2) in enumerate(zip(y_grid, y_grid[1:])):
         for x, (x1, x2) in enumerate(zip(x_grid, x_grid[1:])):
-            center_x = (x1 + x2) * 0.5
-            center_y = (y1 + y2) * 0.5
-
-            # Check if any architectural element (wall, window, door) overlaps with this grid cell
-            # Using center point detection to mark occupied cells
-            # FIXED: Use <= instead of < to include elements on exact boundaries
+            # AABB overlap detection: Check if cell [x1,y1,x2,y2] overlaps with wall
+            # Overlap condition: wall.x1 < x2 AND wall.x2 > x1 AND wall.y1 < y2 AND wall.y2 > y1
+            # This catches ALL overlaps, even partial ones (thin walls, edges, corners)
             for wall in walls:
-                if wall.x1 <= center_x <= wall.x2 \
-                    and wall.y1 <= center_y <= wall.y2:
+                if wall.x1 < x2 and wall.x2 > x1 and wall.y1 < y2 and wall.y2 > y1:
                     tiles[x + y * width] = 0
                     elements_marked += 1
                     element_type_counts[wall.type] = element_type_counts.get(wall.type, 0) + 1
                     break
 
-    print(f"Marked {elements_marked} cells: {element_type_counts['wall']} wall, {element_type_counts['window']} window, {element_type_counts['door']} door")
+    print(f"✓ OVERLAP-based marking: {elements_marked} cells marked")
+    print(f"  - {element_type_counts['wall']} wall cells")
+    print(f"  - {element_type_counts['window']} window cells")
+    print(f"  - {element_type_counts['door']} door cells")
 
     # ============================================================================
     # BULLETPROOF GAP FILLING ALGORITHM - GUARANTEED ZERO GAPS
@@ -535,27 +548,40 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
         print(f"⚠ Gap filling stopped after {max_iterations} iterations (safety limit). Check results.")
 
     # ============================================================================
-    # ULTRA-AGGRESSIVE GAP FILLING - FINAL MULTI-PASS
+    # ULTRA-AGGRESSIVE GAP FILLING - SIZE-LIMITED MULTI-PASS
     # ============================================================================
-    # User: "still gaps between door and wall when wall is wider - ALWAYS fill!"
+    # PREVIOUS BUG: Filled ALL cells with 1+ adjacent neighbor
+    #   - Problem: Rooms have walls as neighbors → filled entire rooms!
+    #   - Result: No floors, everything is walls, model is broken
     #
-    # Even with thickness unification, detection errors leave tiny gaps.
-    # SOLUTION: Fill ALL cells adjacent to ANY occupied cell, repeatedly!
+    # NEW SOLUTION: Fill ONLY SMALL cells (likely detection errors/gaps)
+    #   - Small cell threshold: 0.1m × 0.1m = 0.01 m² (10cm × 10cm)
+    #   - Real gaps: Usually < 5cm (0.05m) due to detection errors
+    #   - Real rooms: Usually > 1m (way above threshold)
+    #   - Also require 2+ adjacent neighbors (not just 1) for extra safety
     #
     # Strategy:
-    # - Pass 1: Fill all cells with 1 neighbor
-    # - Pass 2: Fill newly adjacent cells (cascade effect)
+    # - Pass 1: Fill small cells with 2+ neighbors
+    # - Pass 2: Fill newly adjacent small cells (cascade effect)
     # - Repeat until nothing left to fill
-    # Result: ZERO GAPS GUARANTEED!
+    # Result: GAPS FILLED, ROOMS PRESERVED!
     # ============================================================================
 
-    print(f"Starting ULTRA-AGGRESSIVE gap filling (adjacency-based multi-pass)...")
+    print(f"Starting SIZE-LIMITED gap filling (small cells only)...")
+
+    # Size threshold: 0.1m × 0.1m = 0.01 m²
+    # Cells smaller than this are likely gaps, not rooms
+    SIZE_THRESHOLD = 0.01  # m²
+    MIN_ADJACENT_COUNT = 2  # Require at least 2 neighbors (prevents filling large areas)
+
     ultra_aggressive_total = 0
     ultra_aggressive_pass = 0
+    skipped_large_cells = 0
 
     while ultra_aggressive_pass < 10:  # Max 10 passes
         ultra_aggressive_pass += 1
         filled_this_pass = 0
+        skipped_this_pass = 0
 
         for y in range(height):
             for x in range(width):
@@ -563,7 +589,19 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                 if tiles[x + y * width] == 0:
                     continue
 
-                # Check if this empty cell is directly adjacent to ANY occupied cell
+                # Calculate cell size (physical dimensions)
+                x1, x2 = x_grid[x], x_grid[x + 1]
+                y1, y2 = y_grid[y], y_grid[y + 1]
+                cell_width = x2 - x1
+                cell_height = y2 - y1
+                cell_area = cell_width * cell_height
+
+                # CRITICAL: Skip cells larger than threshold (these are rooms, not gaps!)
+                if cell_area > SIZE_THRESHOLD:
+                    skipped_this_pass += 1
+                    continue
+
+                # Check if this empty cell is directly adjacent to occupied cells
                 adjacent_count = 0
 
                 # Check all 4 directions
@@ -576,24 +614,25 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
                 if y < height - 1 and tiles[x + (y+1) * width] == 0:
                     adjacent_count += 1
 
-                # Fill if has at least 1 adjacent occupied cell
-                if adjacent_count > 0:
-                    x1, x2 = x_grid[x], x_grid[x + 1]
-                    y1, y2 = y_grid[y], y_grid[y + 1]
-
+                # Fill if has at least MIN_ADJACENT_COUNT neighbors AND is small enough
+                if adjacent_count >= MIN_ADJACENT_COUNT:
                     tiles[x + y * width] = 0
                     walls.append(Wall(x1, y1, x2, y2, "wall"))
                     filled_this_pass += 1
 
         ultra_aggressive_total += filled_this_pass
+        skipped_large_cells += skipped_this_pass
 
         if filled_this_pass == 0:
-            print(f"✓ ULTRA-AGGRESSIVE complete after {ultra_aggressive_pass} pass(es)")
+            print(f"✓ SIZE-LIMITED filling complete after {ultra_aggressive_pass} pass(es)")
             break
         else:
-            print(f"  [Ultra pass {ultra_aggressive_pass}] Filled {filled_this_pass} adjacent cell(s)")
+            print(f"  [Pass {ultra_aggressive_pass}] Filled {filled_this_pass} small cell(s), skipped {skipped_this_pass} large cell(s)")
 
-    print(f"✓ ULTRA-AGGRESSIVE total: {ultra_aggressive_total} cell(s) filled - ZERO GAPS GUARANTEED!")
+    print(f"✓ SIZE-LIMITED total: {ultra_aggressive_total} small gap(s) filled")
+    print(f"  - Skipped {skipped_large_cells} large cells (preserved rooms)")
+    print(f"  - Threshold: {SIZE_THRESHOLD} m² ({SIZE_THRESHOLD**0.5:.3f}m × {SIZE_THRESHOLD**0.5:.3f}m)")
+    print(f"  - Min neighbors: {MIN_ADJACENT_COUNT}")
 
     # Find missing walls by checking the image for every empty cell. By randomly sampling pixels, if the cell is 80% black pixels, it's probably a wall.
     if sample_image is not None:
@@ -732,17 +771,46 @@ def find_rooms(walls: "list[Wall]", tolerance: float, sample_image: "Callable[[f
     # ============================================================================
 
     total_rooms_with_floors = len(room_meshes)
-    print(f"✓ Floor generation complete:")
-    print(f"  - {total_rooms_with_floors} room(s) with floors")
-    print(f"  - {quads_generated} floor quad(s) generated")
-    print(f"  - Grid: {width}x{height} cells")
+    print(f"")
+    print(f"=" * 80)
+    print(f"✓ 3D MODEL GENERATION COMPLETE")
+    print(f"=" * 80)
+    print(f"Grid Statistics:")
+    print(f"  - Grid size: {width}x{height} cells ({width * height} total)")
+    print(f"  - Smallest cell: {min_x_gap:.4f}m × {min_y_gap:.4f}m")
+    print(f"")
+    print(f"Gap Filling Results:")
+    print(f"  - Elements marked: {elements_marked} cells")
+    print(f"  - Bulletproof filling: Multiple passes completed")
+    print(f"  - Size-limited filling: {ultra_aggressive_total} small gap(s) filled")
+    print(f"  - Large cells preserved: {skipped_large_cells} (rooms)")
+    print(f"")
+    print(f"Floor Generation:")
+    print(f"  - Rooms detected: {rooms_detected}")
+    print(f"  - Rooms with floors: {total_rooms_with_floors}")
+    print(f"  - Floor quads: {quads_generated}")
+    print(f"")
 
     if total_rooms_with_floors == 0:
-        print(f"⚠ WARNING: NO FLOORS GENERATED!")
-        print(f"  Possible causes:")
-        print(f"  - All cells marked as walls (check gap filling)")
-        print(f"  - Flood-fill found no rooms (check border marking)")
-        print(f"  - Rectangle merging failed (check greedy algorithm)")
+        print(f"⚠⚠⚠ WARNING: NO FLOORS GENERATED! ⚠⚠⚠")
+        print(f"Possible causes:")
+        print(f"  1. All cells marked as walls → Check element marking")
+        print(f"  2. Gap filling too aggressive → Check size threshold")
+        print(f"  3. Border marking wrong → Check border cells")
+        print(f"  4. Flood-fill failed → Check room detection")
+        print(f"")
+        print(f"Debug info:")
+        print(f"  - Total cells: {width * height}")
+        print(f"  - Border cells: {border_cells_marked}")
+        print(f"  - Element cells: {elements_marked}")
+        print(f"  - Gap-filled cells: {ultra_aggressive_total}")
+        print(f"  - Remaining free: {(width * height) - border_cells_marked - elements_marked - ultra_aggressive_total}")
+        print(f"")
+    else:
+        print(f"✓✓✓ SUCCESS: Model generated with {total_rooms_with_floors} room(s)!")
+
+    print(f"=" * 80)
+    print(f"")
 
     return room_meshes
 
